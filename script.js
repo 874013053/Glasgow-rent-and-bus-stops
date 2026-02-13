@@ -14,7 +14,7 @@ const map = new mapboxgl.Map({
 
 map.addControl(new mapboxgl.NavigationControl());
 
-// ===== STYLE layer ids (你原来写的) =====
+// ===== STYLE layer ids =====
 const wardLayerId = "glasgow-wards-rent copy"; // 你在 Studio 看到的 wards fill layer id
 const stopsSourceLayerName = "glasgow_stops";  // stops tileset source-layer name
 
@@ -46,7 +46,7 @@ function fmt(n) {
   return num.toLocaleString();
 }
 
-/** 找 stops layer id：优先直接叫 glasgow_stops，其次按 source-layer 匹配 */
+
 function findStopsLayerId() {
   if (map.getLayer("glasgow_stops")) return "glasgow_stops";
 
@@ -59,7 +59,7 @@ function findStopsLayerId() {
   return hit ? hit.id : null;
 }
 
-/** ✅ 关键：找出所有 wards 相关的“可视图层”，避免 GitHub 上过滤错层没反应 */
+
 function findWardVisualLayerIds() {
   const layers = map.getStyle()?.layers || [];
   const candidates = layers.filter((l) => {
@@ -80,14 +80,14 @@ function findWardVisualLayerIds() {
     .map((l) => l.id);
 }
 
-/** 读取 bed checkbox（去掉 clear 机制：允许任意取消/选择，但至少要选一个） */
+
 function readBedsFromUI() {
   const checks = Array.from(document.querySelectorAll("#bedFilters .bedChk"));
   const selected = checks.filter((c) => c.checked).map((c) => Number(c.value));
 
-  // 至少保留一个，否则地图会全空，很多人会以为“坏了”
+
   if (selected.length === 0) {
-    // 自动把最后一个操作撤回：默认恢复全选（你也可以改成恢复 1 bed）
+ 
     checks.forEach((c) => (c.checked = true));
     selectedBeds = checks.map((c) => Number(c.value));
     return;
@@ -118,7 +118,7 @@ function updateLegendMeta() {
 function applyWardFilters() {
   const f = wardFilters();
 
-  // ✅ 双保险：过滤 wardLayerId + 同源所有 ward 相关图层
+
   const ids = findWardVisualLayerIds();
 
   ids.forEach((id) => {
@@ -131,7 +131,7 @@ function applyWardFilters() {
 
   updateLegendMeta();
 
-  // ✅ 调试：你在 GitHub 页面打开 F12 Console 就能看到是否真的在过滤
+ 
   console.log("[applyWardFilters]", { selectedQuarter, selectedBeds, filteredLayers: ids });
 }
 
@@ -179,8 +179,7 @@ function applyWardFilters() {
     });
   }
 
-  // ❌ Clear beds：按你要求去掉（即使 HTML 里有按钮，也不绑定任何事件）
-
+ 
   // Toggle bus stops
   const toggleStopsBtn = getEl("toggleStops");
   if (toggleStopsBtn) {
@@ -287,3 +286,4 @@ map.on("load", () => {
       .addTo(map);
   });
 });
+
