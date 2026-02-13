@@ -11,34 +11,22 @@ const map = new mapboxgl.Map({
 
 map.addControl(new mapboxgl.NavigationControl());
 
-// =====================
-// CONFIG (确认你的 ward layer id)
-// =====================
-const WARD_LAYER_ID = "glasgow-wards-rent copy";
-
-// 如果自动识别 stops 失败，你在这里填你 style 里“公交站点图层”的 layer id（不是 tileset 名）
+// ========= OPTIONAL: if you know the exact stop layer id in STYLE, put here =========
 const STOPS_LAYER_ID_MANUAL = ""; // e.g. "glasgow_stops"
 
-// =====================
-// UI state
-// =====================
-const quarters = buildQuarters("2019 Q1", "2023 Q4"); // 20 quarters
-let selectedQuarter = quarters[0]; // default
-let selectedBeds = [1, 2, 3]; // default all
+// ========= STATE =========
+const quarters = buildQuarters("2019 Q1", "2023 Q4"); // 20
+let selectedQuarter = quarters[0];
+let selectedBeds = [1, 2, 3];
 
-// ward source info (用于高亮线层)
+let wardFillLayerId = null;   // ✅ 自动识别真正填色的 ward layer
 let wardSourceId = null;
 let wardSourceLayer = null;
 
-// stops layer id
 let stopsLayerId = null;
 
-// =====================
-// Helpers
-// =====================
-function $(id) {
-  return document.getElementById(id);
-}
+// ========= HELPERS =========
+function $(id) { return document.getElementById(id); }
 
 function setStatus(msg, isError = true) {
   const el = $("status");
@@ -55,14 +43,10 @@ function fmt(n) {
 }
 
 function buildQuarters(start, end) {
-  // start/end format: "YYYY Qn"
   const [sy, sq] = start.split(" Q");
   const [ey, eq] = end.split(" Q");
-  const startY = Number(sy);
-  const startQ = Number(sq);
-  const endY = Number(ey);
-  const endQ = Number(eq);
-
+  const startY = Number(sy), startQ = Number(sq);
+  const endY = Number(ey), endQ = Number(eq);
   const out = [];
   for (let y = startY; y <= endY; y++) {
     for (let q = 1; q <= 4; q++) {
@@ -74,33 +58,75 @@ function buildQuarters(start, end) {
   return out;
 }
 
-// =====================
-// Filters
-// =====================
-function wardFilterExpression() {
-  // 兼容 YEARLY_QUARTER 里是否有空格：两边都去空格再比较
-  const qSelected = selectedQuarter.replace(/\s/g, ""); // "2019Q1"
-  const qField = ["replace", ["to-string", ["get", "YEARLY_QUARTER"]], " ", ""]; // remove spaces
+// ========= AUTO-DETECT LAYERS =========
+function detectWardFillLayer() {
+  const layers = map.getStyle()?.layers || [];
 
-  // ✅ 改为 AGG_BEDROOMS
+  // 候选：fill 图层 + id里带 ward/rent/glasgow
+  const candidates = layers.filter((ly) => {
+    const id = (ly.id || "").toLowerCase();
+    const type = (ly.type || "").toLowerCase();
+    const okName =
+      id.includes("ward") || id.includes("wards") || id.includes("rent");
+    return type === "fill" && okName;
+  });
+
+  if (!candidates.length) return null;
+
+  // 选“当前渲染得最多 feature 的那个”作为填色层（最靠谱）
+  let best = null;
+  let bestCount = -1;
+  for (const c of candidates) {
+    try {
+      const n = map.queryRenderedFeatures({ layers: [c.id] }).length;
+      if (n > bestCount) {
+        bestCount = n;
+        best = c;
+      }
+    } catch (_) {}
+  }
+  return best ? best.id : candidates[0].id;
+}
+
+function detectStopsLayer() {
+  if (STOPS_LAYER_ID_MANUAL && map.getLayer(STOPS_LAYER_ID_MANUAL)) return STOPS_LAYER_ID_MANUAL;
+
+  const layers = map.getStyle()?.layers || [];
+  const candidates = layers.filter((ly) => {
+    const id = (ly.id || "").toLowerCase();
+    const type = (ly.type || "").toLowerCase();
+    const looks = id.includes("stop") || id.includes("stops") || id.includes("bus");
+    const isPoint = type === "circle" || type === "symbol";
+    return looks && isPoint;
+  });
+
+  return candidates.length ? candidates[0].id : null;
+}
+
+// ========= FILTER EXPRESSION =========
+function wardFilterExpression() {
+  // quarter 去空格匹配
+  const qSelected = selectedQuarter.replace(/\s/g, "");
+  const qField = ["replace", ["to-string", ["get", "YEARLY_QUARTER"]], " ", ""];
+
+  // bedrooms 用 AGG_BEDROOMS
   const bedExpr =
     selectedBeds.length === 0
-      ? ["==", 1, 0] // always false => show nothing
+      ? ["==", 1, 0]
       : ["in", ["to-number", ["get", "AGG_BEDROOMS"]], ["literal", selectedBeds]];
 
   return ["all", ["==", qField, qSelected], bedExpr];
 }
 
 function applyWardFilters() {
-  if (!map.getLayer(WARD_LAYER_ID)) {
-    setStatus(`Ward layer not found: "${WARD_LAYER_ID}" (check style layer id)`);
+  if (!wardFillLayerId || !map.getLayer(wardFillLayerId)) {
+    setStatus("Ward fill layer not detected, cannot filter.", true);
     return;
   }
   setStatus("");
 
-  map.setFilter(WARD_LAYER_ID, wardFilterExpression());
+  map.setFilter(wardFillLayerId, wardFilterExpression());
 
-  // reset highlight (avoid highlighting filtered-out wards)
   if (map.getLayer("ward-highlight")) {
     map.setFilter("ward-highlight", ["==", ["get", "WD23CD"], ""]);
   }
@@ -111,39 +137,14 @@ function applyWardFilters() {
 function updateLegendMeta() {
   const meta = $("legendMeta");
   if (!meta) return;
-
-  const bedText =
-    selectedBeds.length === 0 ? "None (no wards shown)" : selectedBeds.join("+");
-
+  const bedText = selectedBeds.length ? selectedBeds.join("+") : "None (no wards shown)";
   meta.textContent = `Quarter: ${selectedQuarter}, Bed: ${bedText}`;
 }
 
-// =====================
-// Stops
-// =====================
-function guessStopsLayerId() {
-  if (STOPS_LAYER_ID_MANUAL && map.getLayer(STOPS_LAYER_ID_MANUAL)) {
-    return STOPS_LAYER_ID_MANUAL;
-  }
-
-  const layers = map.getStyle()?.layers || [];
-  const candidates = layers.filter((ly) => {
-    const id = (ly.id || "").toLowerCase();
-    const type = (ly.type || "").toLowerCase();
-    const looksLikeStops =
-      id.includes("stop") || id.includes("stops") || id.includes("bus");
-    const isPoint = type === "circle" || type === "symbol";
-    return looksLikeStops && isPoint;
-  });
-
-  return candidates.length ? candidates[0].id : null;
-}
-
+// ========= STOPS TOGGLE =========
 function toggleStops() {
   if (!stopsLayerId || !map.getLayer(stopsLayerId)) {
-    setStatus(
-      `Stops layer not found. If toggle doesn't work, set STOPS_LAYER_ID_MANUAL in script.js.`
-    );
+    setStatus("Stops layer not found (set STOPS_LAYER_ID_MANUAL if needed).", true);
     return;
   }
   setStatus("");
@@ -152,20 +153,14 @@ function toggleStops() {
   map.setLayoutProperty(stopsLayerId, "visibility", v === "none" ? "visible" : "none");
 }
 
-// =====================
-// Hover highlight + click popup
-// =====================
+// ========= HOVER + POPUP =========
 function setupWardHoverAndPopup() {
-  const wardLayer = map.getLayer(WARD_LAYER_ID);
-  if (!wardLayer) {
-    setStatus(`Ward layer not found: "${WARD_LAYER_ID}" (hover/popup disabled)`);
-    return;
-  }
+  if (!wardFillLayerId || !map.getLayer(wardFillLayerId)) return;
 
+  const wardLayer = map.getLayer(wardFillLayerId);
   wardSourceId = wardLayer.source;
   wardSourceLayer = wardLayer["source-layer"] || null;
 
-  // highlight layer
   if (!map.getLayer("ward-highlight")) {
     map.addLayer(
       {
@@ -173,44 +168,35 @@ function setupWardHoverAndPopup() {
         type: "line",
         source: wardSourceId,
         ...(wardSourceLayer ? { "source-layer": wardSourceLayer } : {}),
-        paint: {
-          "line-color": "#111",
-          "line-width": 3
-        },
+        paint: { "line-color": "#111", "line-width": 3 },
         filter: ["==", ["get", "WD23CD"], ""]
       },
-      WARD_LAYER_ID
+      wardFillLayerId
     );
   }
 
-  map.on("mousemove", WARD_LAYER_ID, (e) => {
+  map.on("mousemove", wardFillLayerId, (e) => {
     map.getCanvas().style.cursor = "pointer";
     if (!e.features || !e.features.length) return;
-
-    const f = e.features[0];
-    const code = f.properties?.WD23CD ? String(f.properties.WD23CD) : "";
-    if (map.getLayer("ward-highlight")) {
-      map.setFilter("ward-highlight", ["==", ["get", "WD23CD"], code]);
-    }
+    const code = String(e.features[0].properties?.WD23CD ?? "");
+    map.setFilter("ward-highlight", ["==", ["get", "WD23CD"], code]);
   });
 
-  map.on("mouseleave", WARD_LAYER_ID, () => {
+  map.on("mouseleave", wardFillLayerId, () => {
     map.getCanvas().style.cursor = "";
-    if (map.getLayer("ward-highlight")) {
-      map.setFilter("ward-highlight", ["==", ["get", "WD23CD"], ""]);
-    }
+    map.setFilter("ward-highlight", ["==", ["get", "WD23CD"], ""]);
   });
 
-  map.on("click", WARD_LAYER_ID, (e) => {
+  map.on("click", wardFillLayerId, (e) => {
     if (!e.features || !e.features.length) return;
-
     const p = e.features[0].properties || {};
+
     const html = `
-      <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; font-size: 13px; line-height: 1.35;">
-        <div style="font-weight:700; font-size:14px; margin-bottom:6px;">${p.WD23NM || p.WARD || "Ward"}</div>
+      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;font-size:13px;line-height:1.35;">
+        <div style="font-weight:700;font-size:14px;margin-bottom:6px;">${p.WD23NM || p.WARD || "Ward"}</div>
         <div><b>Bedrooms</b>: ${p.AGG_BEDROOMS ?? "N/A"}</div>
         <div><b>Quarter</b>: ${p.YEARLY_QUARTER ?? "N/A"}</div>
-        <hr style="border:none; border-top:1px solid #e6e6e6; margin:8px 0;">
+        <hr style="border:none;border-top:1px solid #e6e6e6;margin:8px 0;">
         <div><b>Median rent</b>: ${fmt(p.median)}</div>
         <div><b>Mean rent</b>: ${fmt(p.mean)}</div>
         <div><b>Count</b>: ${fmt(p.count)}</div>
@@ -225,22 +211,20 @@ function setupWardHoverAndPopup() {
   });
 }
 
-// =====================
-// UI binding
-// =====================
+// ========= UI =========
 function readBedsFromUI() {
-  const checks = Array.from(document.querySelectorAll(".bedChk"));
-  selectedBeds = checks.filter((c) => c.checked).map((c) => Number(c.value));
+  selectedBeds = Array.from(document.querySelectorAll(".bedChk"))
+    .filter((c) => c.checked)
+    .map((c) => Number(c.value));
 }
 
 function bindUI() {
-  // Quarter slider
   const qSlider = $("qSlider");
   const qLabel = $("qLabel");
 
   if (qSlider) {
     qSlider.min = 0;
-    qSlider.max = String(Math.max(0, quarters.length - 1));
+    qSlider.max = String(quarters.length - 1);
     qSlider.step = "1";
     qSlider.value = "0";
     if (qLabel) qLabel.textContent = quarters[0];
@@ -253,78 +237,58 @@ function bindUI() {
     });
   }
 
-  // Bedrooms: event delegation (robust)
   document.addEventListener("change", (e) => {
-    if (e.target && e.target.classList && e.target.classList.contains("bedChk")) {
+    if (e.target?.classList?.contains("bedChk")) {
       readBedsFromUI();
       applyWardFilters();
     }
   });
 
-  // All beds
-  const allBtn = $("allBedsBtn");
-  if (allBtn) {
-    allBtn.addEventListener("click", () => {
-      document.querySelectorAll(".bedChk").forEach((c) => (c.checked = true));
-      readBedsFromUI();
-      applyWardFilters();
-    });
-  }
+  $("allBedsBtn")?.addEventListener("click", () => {
+    document.querySelectorAll(".bedChk").forEach((c) => (c.checked = true));
+    readBedsFromUI();
+    applyWardFilters();
+  });
 
-  // Clear = clear all beds (map may become empty)
-  const clearBtn = $("clearBedsBtn");
-  if (clearBtn) {
-    clearBtn.addEventListener("click", () => {
-      document.querySelectorAll(".bedChk").forEach((c) => (c.checked = false));
-      readBedsFromUI(); // []
-      applyWardFilters();
-    });
-  }
+  $("clearBedsBtn")?.addEventListener("click", () => {
+    document.querySelectorAll(".bedChk").forEach((c) => (c.checked = false));
+    readBedsFromUI();
+    applyWardFilters();
+  });
 
-  // Toggle bus stops
-  const stopsBtn = $("toggleStops");
-  if (stopsBtn) stopsBtn.addEventListener("click", toggleStops);
+  $("toggleStops")?.addEventListener("click", toggleStops);
 
-  // Reset view
-  const resetBtn = $("resetView");
-  if (resetBtn) {
-    resetBtn.addEventListener("click", () => {
-      map.flyTo({ center: [-4.2518, 55.8642], zoom: 11, essential: true });
-    });
-  }
+  $("resetView")?.addEventListener("click", () => {
+    map.flyTo({ center: [-4.2518, 55.8642], zoom: 11, essential: true });
+  });
 
-  // Legend toggle
-  const legendBtn = $("toggleLegend");
-  if (legendBtn) {
-    legendBtn.addEventListener("click", () => {
-      const el = $("legend");
-      if (!el) return;
-      const hidden = el.style.display === "none";
-      el.style.display = hidden ? "block" : "none";
-    });
-  }
+  $("toggleLegend")?.addEventListener("click", () => {
+    const el = $("legend");
+    if (!el) return;
+    el.style.display = el.style.display === "none" ? "block" : "none";
+  });
 
   updateLegendMeta();
 }
 
-// =====================
-// Map load
-// =====================
+// ========= START =========
 map.on("load", () => {
-  // detect stops layer
-  stopsLayerId = guessStopsLayerId();
-  if (!stopsLayerId) {
-    setStatus(
-      "Stops layer not auto-detected. Toggle may not work until you set STOPS_LAYER_ID_MANUAL.",
-      false
-    );
+  // 1) detect layers
+  wardFillLayerId = detectWardFillLayer();
+  stopsLayerId = detectStopsLayer();
+
+  if (!wardFillLayerId) {
+    setStatus("Could not detect ward fill layer. Check your style layers naming.", true);
   } else {
-    setStatus("", false);
+    setStatus(`Detected ward fill layer: ${wardFillLayerId}`, false);
   }
 
-  setupWardHoverAndPopup();
+  // 2) bind UI
   bindUI();
 
-  // initial filters
+  // 3) setup hover/popup on detected layer
+  setupWardHoverAndPopup();
+
+  // 4) apply initial filter
   applyWardFilters();
 });
