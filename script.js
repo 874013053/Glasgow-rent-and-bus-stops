@@ -2,37 +2,41 @@
 mapboxgl.accessToken =
   "pk.eyJ1IjoiODc0MDEzMDUzIiwiYSI6ImNtbGtoeGMyZzA2aWQzZHF1M2J6bWVwMmwifQ.IbunfJx4bhtaedoCqw972w";
 
+const homeCenter = [-4.2518, 55.8642];
+const homeZoom = 11;
+
 const map = new mapboxgl.Map({
   container: "map",
   style: "mapbox://styles/874013053/cmlkv97ap004d01s9cf019870",
-  center: [-4.2518, 55.8642],
-  zoom: 11
+  center: homeCenter,
+  zoom: homeZoom
 });
 
 map.addControl(new mapboxgl.NavigationControl());
 
-// ========= OPTIONAL: if you know the exact stop layer id in STYLE, put here =========
-const STOPS_LAYER_ID_MANUAL = ""; // e.g. "glasgow_stops"
+// ===== STYLE layer ids (你原来写的) =====
+const wardLayerId = "glasgow-wards-rent copy"; // 你在 Studio 看到的 wards fill layer id
+const stopsSourceLayerName = "glasgow_stops";  // stops tileset source-layer name
 
-// ========= STATE =========
-const quarters = buildQuarters("2019 Q1", "2023 Q4"); // 20
-let selectedQuarter = quarters[0];
-let selectedBeds = [1, 2, 3];
+// ===== quarters: 2019 Q1–2023 Q4 =====
+const quarters = (() => {
+  const out = [];
+  for (let y = 2019; y <= 2023; y++) {
+    for (let q = 1; q <= 4; q++) out.push(`${y} Q${q}`);
+  }
+  return out;
+})();
 
-let wardFillLayerId = null;   // ✅ 自动识别真正填色的 ward layer
+// ===== state =====
+let selectedQuarter = quarters[0];    // "2019 Q1"
+let selectedBeds = [1, 2, 3];         // multi-select beds
+
 let wardSourceId = null;
 let wardSourceLayer = null;
 
-let stopsLayerId = null;
-
-// ========= HELPERS =========
-function $(id) { return document.getElementById(id); }
-
-function setStatus(msg, isError = true) {
-  const el = $("status");
-  if (!el) return;
-  el.textContent = msg || "";
-  el.style.color = isError ? "#b00020" : "#0b6b0b";
+// ===== helpers =====
+function getEl(id) {
+  return document.getElementById(id);
 }
 
 function fmt(n) {
@@ -42,125 +46,191 @@ function fmt(n) {
   return num.toLocaleString();
 }
 
-function buildQuarters(start, end) {
-  const [sy, sq] = start.split(" Q");
-  const [ey, eq] = end.split(" Q");
-  const startY = Number(sy), startQ = Number(sq);
-  const endY = Number(ey), endQ = Number(eq);
-  const out = [];
-  for (let y = startY; y <= endY; y++) {
-    for (let q = 1; q <= 4; q++) {
-      if (y === startY && q < startQ) continue;
-      if (y === endY && q > endQ) continue;
-      out.push(`${y} Q${q}`);
-    }
-  }
-  return out;
-}
-
-// ========= AUTO-DETECT LAYERS =========
-function detectWardFillLayer() {
-  const layers = map.getStyle()?.layers || [];
-
-  // 候选：fill 图层 + id里带 ward/rent/glasgow
-  const candidates = layers.filter((ly) => {
-    const id = (ly.id || "").toLowerCase();
-    const type = (ly.type || "").toLowerCase();
-    const okName =
-      id.includes("ward") || id.includes("wards") || id.includes("rent");
-    return type === "fill" && okName;
-  });
-
-  if (!candidates.length) return null;
-
-  // 选“当前渲染得最多 feature 的那个”作为填色层（最靠谱）
-  let best = null;
-  let bestCount = -1;
-  for (const c of candidates) {
-    try {
-      const n = map.queryRenderedFeatures({ layers: [c.id] }).length;
-      if (n > bestCount) {
-        bestCount = n;
-        best = c;
-      }
-    } catch (_) {}
-  }
-  return best ? best.id : candidates[0].id;
-}
-
-function detectStopsLayer() {
-  if (STOPS_LAYER_ID_MANUAL && map.getLayer(STOPS_LAYER_ID_MANUAL)) return STOPS_LAYER_ID_MANUAL;
+/** 找 stops layer id：优先直接叫 glasgow_stops，其次按 source-layer 匹配 */
+function findStopsLayerId() {
+  if (map.getLayer("glasgow_stops")) return "glasgow_stops";
 
   const layers = map.getStyle()?.layers || [];
-  const candidates = layers.filter((ly) => {
-    const id = (ly.id || "").toLowerCase();
-    const type = (ly.type || "").toLowerCase();
-    const looks = id.includes("stop") || id.includes("stops") || id.includes("bus");
-    const isPoint = type === "circle" || type === "symbol";
-    return looks && isPoint;
+  const hit = layers.find(
+    (l) =>
+      (l.type === "circle" || l.type === "symbol") &&
+      l["source-layer"] === stopsSourceLayerName
+  );
+  return hit ? hit.id : null;
+}
+
+/** ✅ 关键：找出所有 wards 相关的“可视图层”，避免 GitHub 上过滤错层没反应 */
+function findWardVisualLayerIds() {
+  const layers = map.getStyle()?.layers || [];
+  const candidates = layers.filter((l) => {
+    const id = String(l.id || "").toLowerCase();
+    const type = String(l.type || "").toLowerCase();
+    const looksWard = id.includes("ward") || id.includes("wards") || id.includes("rent");
+    const drawable = type === "fill" || type === "line" || type === "symbol";
+    return looksWard && drawable;
   });
 
-  return candidates.length ? candidates[0].id : null;
+  // 只过滤与 wardLayerId 同一个 source 的层（避免误伤）
+  const base = map.getLayer(wardLayerId);
+  const baseSource = base?.source;
+  if (!baseSource) return [wardLayerId]; // fallback
+
+  return candidates
+    .filter((l) => map.getLayer(l.id)?.source === baseSource)
+    .map((l) => l.id);
 }
 
-// ========= FILTER EXPRESSION =========
-function wardFilterExpression() {
-  // quarter 去空格匹配
-  const qSelected = selectedQuarter.replace(/\s/g, "");
-  const qField = ["replace", ["to-string", ["get", "YEARLY_QUARTER"]], " ", ""];
+/** 读取 bed checkbox（去掉 clear 机制：允许任意取消/选择，但至少要选一个） */
+function readBedsFromUI() {
+  const checks = Array.from(document.querySelectorAll("#bedFilters .bedChk"));
+  const selected = checks.filter((c) => c.checked).map((c) => Number(c.value));
 
-  // bedrooms 用 AGG_BEDROOMS
-  const bedExpr =
-    selectedBeds.length === 0
-      ? ["==", 1, 0]
-      : ["in", ["to-number", ["get", "AGG_BEDROOMS"]], ["literal", selectedBeds]];
-
-  return ["all", ["==", qField, qSelected], bedExpr];
-}
-
-function applyWardFilters() {
-  if (!wardFillLayerId || !map.getLayer(wardFillLayerId)) {
-    setStatus("Ward fill layer not detected, cannot filter.", true);
+  // 至少保留一个，否则地图会全空，很多人会以为“坏了”
+  if (selected.length === 0) {
+    // 自动把最后一个操作撤回：默认恢复全选（你也可以改成恢复 1 bed）
+    checks.forEach((c) => (c.checked = true));
+    selectedBeds = checks.map((c) => Number(c.value));
     return;
   }
-  setStatus("");
 
-  map.setFilter(wardFillLayerId, wardFilterExpression());
+  selectedBeds = selected;
+}
 
-  if (map.getLayer("ward-highlight")) {
-    map.setFilter("ward-highlight", ["==", ["get", "WD23CD"], ""]);
-  }
+// ===== filters =====
+function wardFilters() {
+  // YEARLY_QUARTER like "2019 Q1"
+  const fQuarter = ["==", ["get", "YEARLY_QUARTER"], selectedQuarter];
 
-  updateLegendMeta();
+  // BEDROOMS like "1 bed" / "2 bed" / "3 bed"
+  const bedStrings = selectedBeds.map((b) => `${b} bed`);
+  const fBed = ["in", ["get", "BEDROOMS"], ["literal", bedStrings]];
+
+  return ["all", fQuarter, fBed];
 }
 
 function updateLegendMeta() {
-  const meta = $("legendMeta");
-  if (!meta) return;
-  const bedText = selectedBeds.length ? selectedBeds.join("+") : "None (no wards shown)";
-  meta.textContent = `Quarter: ${selectedQuarter}, Bed: ${bedText}`;
+  const el = getEl("legendMeta");
+  if (!el) return;
+  const bedText = selectedBeds.length ? selectedBeds.join("+") : "None";
+  el.textContent = `Quarter: ${selectedQuarter}, Bed: ${bedText}`;
 }
 
-// ========= STOPS TOGGLE =========
-function toggleStops() {
-  if (!stopsLayerId || !map.getLayer(stopsLayerId)) {
-    setStatus("Stops layer not found (set STOPS_LAYER_ID_MANUAL if needed).", true);
+function applyWardFilters() {
+  const f = wardFilters();
+
+  // ✅ 双保险：过滤 wardLayerId + 同源所有 ward 相关图层
+  const ids = findWardVisualLayerIds();
+
+  ids.forEach((id) => {
+    if (map.getLayer(id)) map.setFilter(id, f);
+  });
+
+  if (map.getLayer("ward-highlight")) {
+    map.setFilter("ward-highlight", ["all", ["==", ["get", "WD23CD"], ""], f]);
+  }
+
+  updateLegendMeta();
+
+  // ✅ 调试：你在 GitHub 页面打开 F12 Console 就能看到是否真的在过滤
+  console.log("[applyWardFilters]", { selectedQuarter, selectedBeds, filteredLayers: ids });
+}
+
+// ===== UI listeners =====
+(function bindUI() {
+  // Quarter slider
+  const qSlider = getEl("qSlider");
+  const qLabel = getEl("qLabel");
+  if (qSlider && qLabel) {
+    qSlider.min = 0;
+    qSlider.max = quarters.length - 1;
+    qSlider.step = 1;
+    qSlider.value = 0;
+    qLabel.textContent = selectedQuarter;
+
+    qSlider.addEventListener("input", (e) => {
+      const idx = Number(e.target.value);
+      selectedQuarter = quarters[idx] || quarters[0];
+      qLabel.textContent = selectedQuarter;
+      if (map.isStyleLoaded()) applyWardFilters();
+    });
+  }
+
+  // Bedrooms checkboxes
+  const bedWrap = getEl("bedFilters");
+  if (bedWrap) {
+    readBedsFromUI();
+    updateLegendMeta();
+
+    bedWrap.addEventListener("change", (e) => {
+      if (e.target && e.target.classList.contains("bedChk")) {
+        readBedsFromUI();
+        if (map.isStyleLoaded()) applyWardFilters();
+      }
+    });
+  }
+
+  // All beds
+  const allBtn = getEl("allBedsBtn");
+  if (allBtn) {
+    allBtn.addEventListener("click", () => {
+      document.querySelectorAll("#bedFilters .bedChk").forEach((c) => (c.checked = true));
+      readBedsFromUI();
+      if (map.isStyleLoaded()) applyWardFilters();
+    });
+  }
+
+  // ❌ Clear beds：按你要求去掉（即使 HTML 里有按钮，也不绑定任何事件）
+
+  // Toggle bus stops
+  const toggleStopsBtn = getEl("toggleStops");
+  if (toggleStopsBtn) {
+    toggleStopsBtn.addEventListener("click", () => {
+      if (!map.isStyleLoaded()) return;
+
+      const stopsLayerId = findStopsLayerId();
+      if (!stopsLayerId || !map.getLayer(stopsLayerId)) {
+        console.warn("Stops layer not found. Check style layer id / source-layer.");
+        return;
+      }
+
+      const v = map.getLayoutProperty(stopsLayerId, "visibility");
+      map.setLayoutProperty(stopsLayerId, "visibility", v === "none" ? "visible" : "none");
+    });
+  }
+
+  // Reset view
+  const resetBtn = getEl("resetView");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      map.flyTo({ center: homeCenter, zoom: homeZoom });
+    });
+  }
+
+  // Legend toggle
+  const legendBtn = getEl("toggleLegend");
+  if (legendBtn) {
+    legendBtn.addEventListener("click", () => {
+      const el = getEl("legend");
+      if (!el) return;
+      const isHidden = el.style.display === "none";
+      el.style.display = isHidden ? "block" : "none";
+    });
+  }
+})();
+
+// ===== Map interactions =====
+map.on("load", () => {
+  const wardLayer = map.getLayer(wardLayerId);
+  if (!wardLayer) {
+    console.error("Ward layer not found:", wardLayerId);
+    console.log("All style layers:", map.getStyle().layers.map(l => l.id));
     return;
   }
-  setStatus("");
 
-  const v = map.getLayoutProperty(stopsLayerId, "visibility");
-  map.setLayoutProperty(stopsLayerId, "visibility", v === "none" ? "visible" : "none");
-}
-
-// ========= HOVER + POPUP =========
-function setupWardHoverAndPopup() {
-  if (!wardFillLayerId || !map.getLayer(wardFillLayerId)) return;
-
-  const wardLayer = map.getLayer(wardFillLayerId);
   wardSourceId = wardLayer.source;
   wardSourceLayer = wardLayer["source-layer"] || null;
 
+  // Feature 1: hover highlight (add outline layer)
   if (!map.getLayer("ward-highlight")) {
     map.addLayer(
       {
@@ -169,32 +239,39 @@ function setupWardHoverAndPopup() {
         source: wardSourceId,
         ...(wardSourceLayer ? { "source-layer": wardSourceLayer } : {}),
         paint: { "line-color": "#111", "line-width": 3 },
-        filter: ["==", ["get", "WD23CD"], ""]
+        filter: ["all", ["==", ["get", "WD23CD"], ""], wardFilters()]
       },
-      wardFillLayerId
+      wardLayerId
     );
   }
 
-  map.on("mousemove", wardFillLayerId, (e) => {
+  // Apply initial filters
+  applyWardFilters();
+
+  // Feature 1: hover highlight
+  map.on("mousemove", wardLayerId, (e) => {
     map.getCanvas().style.cursor = "pointer";
     if (!e.features || !e.features.length) return;
-    const code = String(e.features[0].properties?.WD23CD ?? "");
-    map.setFilter("ward-highlight", ["==", ["get", "WD23CD"], code]);
+
+    const f = e.features[0];
+    const code = f.properties && f.properties.WD23CD ? String(f.properties.WD23CD) : "";
+    map.setFilter("ward-highlight", ["all", ["==", ["get", "WD23CD"], code], wardFilters()]);
   });
 
-  map.on("mouseleave", wardFillLayerId, () => {
+  map.on("mouseleave", wardLayerId, () => {
     map.getCanvas().style.cursor = "";
-    map.setFilter("ward-highlight", ["==", ["get", "WD23CD"], ""]);
+    map.setFilter("ward-highlight", ["all", ["==", ["get", "WD23CD"], ""], wardFilters()]);
   });
 
-  map.on("click", wardFillLayerId, (e) => {
+  // Feature 2: click popup
+  map.on("click", wardLayerId, (e) => {
     if (!e.features || !e.features.length) return;
-    const p = e.features[0].properties || {};
 
+    const p = e.features[0].properties || {};
     const html = `
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;font-size:13px;line-height:1.35;">
         <div style="font-weight:700;font-size:14px;margin-bottom:6px;">${p.WD23NM || p.WARD || "Ward"}</div>
-        <div><b>Bedrooms</b>: ${p.AGG_BEDROOMS ?? "N/A"}</div>
+        <div><b>Bedrooms</b>: ${p.BEDROOMS ?? "N/A"}</div>
         <div><b>Quarter</b>: ${p.YEARLY_QUARTER ?? "N/A"}</div>
         <hr style="border:none;border-top:1px solid #e6e6e6;margin:8px 0;">
         <div><b>Median rent</b>: ${fmt(p.median)}</div>
@@ -209,86 +286,4 @@ function setupWardHoverAndPopup() {
       .setHTML(html)
       .addTo(map);
   });
-}
-
-// ========= UI =========
-function readBedsFromUI() {
-  selectedBeds = Array.from(document.querySelectorAll(".bedChk"))
-    .filter((c) => c.checked)
-    .map((c) => Number(c.value));
-}
-
-function bindUI() {
-  const qSlider = $("qSlider");
-  const qLabel = $("qLabel");
-
-  if (qSlider) {
-    qSlider.min = 0;
-    qSlider.max = String(quarters.length - 1);
-    qSlider.step = "1";
-    qSlider.value = "0";
-    if (qLabel) qLabel.textContent = quarters[0];
-
-    qSlider.addEventListener("input", (e) => {
-      const idx = Number(e.target.value);
-      selectedQuarter = quarters[idx] ?? quarters[0];
-      if (qLabel) qLabel.textContent = selectedQuarter;
-      applyWardFilters();
-    });
-  }
-
-  document.addEventListener("change", (e) => {
-    if (e.target?.classList?.contains("bedChk")) {
-      readBedsFromUI();
-      applyWardFilters();
-    }
-  });
-
-  $("allBedsBtn")?.addEventListener("click", () => {
-    document.querySelectorAll(".bedChk").forEach((c) => (c.checked = true));
-    readBedsFromUI();
-    applyWardFilters();
-  });
-
-  $("clearBedsBtn")?.addEventListener("click", () => {
-    document.querySelectorAll(".bedChk").forEach((c) => (c.checked = false));
-    readBedsFromUI();
-    applyWardFilters();
-  });
-
-  $("toggleStops")?.addEventListener("click", toggleStops);
-
-  $("resetView")?.addEventListener("click", () => {
-    map.flyTo({ center: [-4.2518, 55.8642], zoom: 11, essential: true });
-  });
-
-  $("toggleLegend")?.addEventListener("click", () => {
-    const el = $("legend");
-    if (!el) return;
-    el.style.display = el.style.display === "none" ? "block" : "none";
-  });
-
-  updateLegendMeta();
-}
-
-// ========= START =========
-map.on("load", () => {
-  // 1) detect layers
-  wardFillLayerId = detectWardFillLayer();
-  stopsLayerId = detectStopsLayer();
-
-  if (!wardFillLayerId) {
-    setStatus("Could not detect ward fill layer. Check your style layers naming.", true);
-  } else {
-    setStatus(`Detected ward fill layer: ${wardFillLayerId}`, false);
-  }
-
-  // 2) bind UI
-  bindUI();
-
-  // 3) setup hover/popup on detected layer
-  setupWardHoverAndPopup();
-
-  // 4) apply initial filter
-  applyWardFilters();
 });
